@@ -1,0 +1,78 @@
+# Instalar as bibliotecas necessárias
+!pip install pandas openpyxl tensorflow keras sklearn
+
+# Importar as bibliotecas necessárias
+import pandas as pd
+import numpy as np
+import openpyxl
+from google.colab import files
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+
+# Fazer o upload do arquivo "Treino.xlsx"
+uploaded = files.upload()
+
+# Ler o arquivo e criar um DataFrame
+input_data = pd.read_excel('Treino.xlsx', engine='openpyxl')
+
+# Renomear as colunas para facilitar o uso
+input_data.rename(columns={'Data': 'ds', 'Ca': 'ca', 'Sku': 'sku', 'Descrição': 'descricao', 'Família': 'familia', 'Departamento': 'departamento', 'Seção': 'secao', 'Categoria': 'categoria', 'Valores': 'y'}, inplace=True)
+
+# Filtrar as colunas necessárias para a previsão
+data = input_data[['ds', 'ca', 'sku', 'y']]
+
+# Agrupar os dados por produto (SKU) e mês
+data_monthly = data.groupby(['sku', pd.Grouper(key='ds', freq='M')]).sum().reset_index()
+
+def train_and_predict_lstm(data, sku, n_future_months):
+    sku_data = data[data['sku'] == sku].reset_index(drop=True)
+    scaler = MinMaxScaler()
+    values = scaler.fit_transform(sku_data[['y']].values.astype('float64'))
+
+    X, y = [], []
+    for i in range(len(values) - n_future_months):
+        X.append(values[i:(i + n_future_months), 0])
+        y.append(values[i + n_future_months, 0])
+    X, y = np.array(X), np.array(y)
+
+    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+
+    # Criar e treinar o modelo LSTM
+    model = Sequential()
+    model.add(LSTM(50, input_shape=(X.shape[1], 1)))
+    model.add(Dense(1))
+    model.compile(loss='mean_squared_error', optimizer='adam')
+    model.fit(X, y, epochs=100, batch_size=1, verbose=0)
+
+    # Prever a demanda futura
+    future_preds = []
+    input_seq = values[-n_future_months:].reshape((1, n_future_months, 1))
+    for _ in range(24):
+        pred = model.predict(input_seq)
+        future_preds.append(pred[0, 0])
+        input_seq = np.append(input_seq[:, 1:], pred).reshape((1, n_future_months, 1))
+
+    future_preds = np.maximum(0, scaler.inverse_transform(np.array(future_preds).reshape(-1, 1)))
+    return future_preds
+
+# Criar um DataFrame para armazenar as previsões
+output_data = pd.DataFrame()
+
+# Prever a demanda para os próximos 2 anos mês a mês por produto
+for sku in data_monthly['sku'].unique():
+    future_preds = train_and_predict_lstm(data_monthly, sku, 12)  # 12 meses para prever os próximos 2 anos
+    future_dates = pd.date_range(start=data_monthly['ds'].max() + pd.DateOffset(months=1), periods=24, freq='M')
+    future_preds_df = pd.DataFrame({'ds': future_dates, 'yhat': future_preds.flatten(), 'sku': sku})
+    output_data = output_data.append(future_preds_df, ignore_index=True)
+
+# Unir as previsões com os dados históricos
+historical_data = data_monthly[['ds', 'y', 'sku']]
+historical_data.rename(columns={'y': 'yhat'}, inplace=True)
+output_data = pd.concat([historical_data, output_data], ignore_index=True)
+
+# Salvar o arquivo "Output.xlsx"
+output_data.to_excel('Output.xlsx', index=False)
+files.download('Output.xlsx')
+
